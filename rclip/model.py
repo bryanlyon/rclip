@@ -1,12 +1,15 @@
 from typing import Callable, List, Tuple, Optional, cast
 
+import os
+
 import clip
 import clip.model
 import numpy as np
 from PIL import Image
-from rclip import utils
+import utils
 import torch
 import torch.nn
+import glob
 
 
 class Model:
@@ -14,7 +17,9 @@ class Model:
   _device = 'cpu'
   _model_name = 'ViT-B/32'
 
-  def __init__(self):
+  def __init__(self, device=None):
+    if device is not None:
+      self._device = device
     model, preprocess = cast(
       Tuple[clip.model.CLIP, Callable[[Image.Image], torch.Tensor]],
       clip.load(self._model_name, device=self._device)
@@ -29,14 +34,16 @@ class Model:
       image_features = self._model.encode_image(images_preprocessed)
       image_features /= image_features.norm(dim=-1, keepdim=True)
 
-    return image_features.cpu().numpy()
+    assert image_features.shape[-1] == self.VECTOR_SIZE
+    return image_features.to(torch.float).cpu().numpy()
 
   def compute_text_features(self, text: List[str]) -> np.ndarray:
     with torch.no_grad():
       text_encoded = self._model.encode_text(clip.tokenize(text).to(self._device))
       text_encoded /= text_encoded.norm(dim=-1, keepdim=True)
 
-    return text_encoded.cpu().numpy()
+    assert text_encoded.shape[-1] == self.VECTOR_SIZE
+    return text_encoded.to(torch.float).cpu().numpy()
 
   def group_query_parameters_by_type(self, queries: List[str]) -> Tuple[List[str], List[str], List[str]]:
     phrase_queries: List[str] = []
@@ -46,7 +53,12 @@ class Model:
         if utils.is_http_url(query):
           url_queries.append(query)
         elif utils.is_file_path(query):
-          local_file_queries.append(query)
+          if os.path.isdir(query):
+            local_file_queries+=os.listdir()
+          if "*" not in query:
+            local_file_queries.append(query)
+          else:
+            local_file_queries+=glob.glob(query)
         else:
           phrase_queries.append(query)
     return phrase_queries, local_file_queries, url_queries

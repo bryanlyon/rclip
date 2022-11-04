@@ -9,7 +9,8 @@ from tqdm import tqdm
 import PIL
 from PIL import Image, ImageFile
 
-from rclip import db, model, utils
+import db, model, utils
+import torch
 
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -35,10 +36,12 @@ def is_image_meta_equal(image: db.Image, meta: ImageMeta) -> bool:
 
 
 class RClip:
-  EXCLUDE_DIRS_DEFAULT = ['@eaDir', 'node_modules', '.git']
-  IMAGE_REGEX = re.compile(r'^.+\.(jpe?g|png)$', re.I)
-  BATCH_SIZE = 8
-  DB_IMAGES_BEFORE_COMMIT = 50_000
+  EXCLUDE_DIRS_DEFAULT = ['@eaDir', 'node_modules', '.git', '__MACOSX']
+  IMAGE_REGEX = re.compile(r'^.+\.(jpe?g|png|webp)$', re.I)
+  IMAGE_EXTS = ("bmp","dib","jpeg","jpg","jpe","jp2","png","webp","pbm","pgm","ppm","pxm","pnm","sr","ras","tiff","tif","exr","hdr","pic")
+
+  BATCH_SIZE = 32
+  DB_IMAGES_BEFORE_COMMIT = 500
 
   class SearchResult(NamedTuple):
     filepath: str
@@ -87,10 +90,11 @@ class RClip:
     for root, _, files in os.walk(directory):
       if self._exclude_dir_regex.match(root):
         continue
-      filtered_files = list(f for f in files if self.IMAGE_REGEX.match(f))
+      # filtered_files = list(f for f in files if self.IMAGE_REGEX.match(f))
+      filtered_files = list(f for f in files if f.endswith(self.IMAGE_EXTS))
       if not filtered_files:
         continue
-      for file in cast(Iterable[str], tqdm(filtered_files, desc=root)):
+      for file in tqdm(filtered_files, desc=root):
         filepath = path.join(root, file)
 
         image = self._db.get_image(filepath=filepath)
@@ -122,7 +126,7 @@ class RClip:
     self._db.commit()
 
   def search(
-      self, query: str, directory: str, top_k: int = 10,
+      self, query: str, directory: str, top_k: float = 10.0,
       positive_queries: List[str] = [], negative_queries: List[str] = []) -> List[SearchResult]:
     filepaths, features = self._get_features(directory)
 
@@ -133,7 +137,10 @@ class RClip:
       lambda similarity: not self._exclude_dir_regex.match(filepaths[similarity[1]]),
       sorted_similarities
     )
-    top_k_similarities = itertools.islice(filtered_similarities, top_k)
+    if top_k >= 1:
+      top_k_similarities = itertools.islice(filtered_similarities, int(top_k))
+    else:
+      top_k_similarities = [x for x in filtered_similarities if x[0] > top_k]
 
     return [RClip.SearchResult(filepath=filepaths[th[1]], score=th[0]) for th in top_k_similarities]
 
@@ -152,17 +159,23 @@ def main():
   arg_parser = utils.init_arg_parser()
   args = arg_parser.parse_args()
 
-  current_directory = os.getcwd()
+  args.path = os.path.abspath(args.path)
 
-  model_instance = model.Model()
+  device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+
+  model_instance = model.Model(device=device)
   datadir = utils.get_app_datadir()
   database = db.DB(datadir / 'db.sqlite3')
   rclip = RClip(model_instance, database, args.exclude_dir)
 
   if not args.skip_index:
-    rclip.ensure_index(current_directory)
+    try:
+      rclip.ensure_index(args.path)
+    except KeyboardInterrupt:
+      rclip._db.commit()
+      raise KeyboardInterrupt
 
-  result = rclip.search(args.query, current_directory, args.top, args.add, args.subtract)
+  result = rclip.search(args.query, args.path, args.top, args.add, args.subtract)
   if args.filepath_only:
     for r in result:
       print(r.filepath)
