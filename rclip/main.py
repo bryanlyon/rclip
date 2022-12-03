@@ -181,7 +181,9 @@ def main():
     for r in result:
       print(r.filepath)
   else:
+    print(f"{len(result)}s found")
     print('score\tfilepath')
+    result.reverse()
     for r in result:
       print(f'{r.score:.3f}\t"{r.filepath}"')
 

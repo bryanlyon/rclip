@@ -30,12 +30,18 @@ class Model:
   def compute_image_features(self, images: List[Image.Image]) -> np.ndarray:
     images_preprocessed = torch.stack([self._preprocess(thumb) for thumb in images]).to(self._device)
 
-    with torch.no_grad():
-      image_features = self._model.encode_image(images_preprocessed)
-      image_features /= image_features.norm(dim=-1, keepdim=True)
+    images_batches = torch.split(images_preprocessed, 32)
+    image_features = None
+
+    for batch in images_batches:
+      with torch.no_grad():
+        batch_features = self._model.encode_image(batch).cpu()
+        image_features = batch_features if image_features is None else torch.cat([image_features, batch_features], dim=0)
+
+    image_features /= image_features.norm(dim=-1, keepdim=True)
 
     assert image_features.shape[-1] == self.VECTOR_SIZE
-    return image_features.to(torch.float).cpu().numpy()
+    return image_features.cpu().to(torch.float).numpy()
 
   def compute_text_features(self, text: List[str]) -> np.ndarray:
     with torch.no_grad():
@@ -54,7 +60,7 @@ class Model:
           url_queries.append(query)
         elif utils.is_file_path(query):
           if os.path.isdir(query):
-            local_file_queries+=os.listdir()
+            local_file_queries+=[os.path.join(query, x) for x in os.listdir(query)]
           if "*" not in query:
             local_file_queries.append(query)
           else:
@@ -72,7 +78,7 @@ class Model:
     if files or urls:
       images = ([utils.download_image(q) for q in urls] +
                 [utils.read_image(q) for q in files])
-      image_features = np.add.reduce(self.compute_image_features(images))
+      image_features = np.mean(self.compute_image_features(images), axis=0)
 
     if text_features is not None and image_features is not None:
         return text_features + image_features
@@ -82,6 +88,15 @@ class Model:
         return image_features
     else:
         return np.zeros(Model.VECTOR_SIZE)
+
+  def list_outliers(features): 
+    average = np.mean(features, axis=0)
+    std = np.std(features, axis=0)
+    outliers = []
+    for i in range(features):
+      if np.abs(features[i]-average)>std:
+        outliers.append(i)
+    return outliers
 
   def compute_similarities_to_text(
       self, item_features: np.ndarray,
